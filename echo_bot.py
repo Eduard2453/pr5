@@ -1,131 +1,86 @@
-import os
 import asyncio
-import logging
-import json
-import datetime
-import math
-import zoneinfo
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message
+from aiogram.filters import Command
+import ollama
 
-from openai import AsyncOpenAI
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
-from dotenv import load_dotenv
+# Укажите токен вашего Telegram-бота
+BOT_TOKEN = "8804982952:AAEfsi9vLUyicFDK1CDf7Az2dDTl1p_b_AA"
 
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PORT = int(os.getenv("PORT", "8080"))
-
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bot")
-
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# ==========================================
-# ИНСТРУМЕНТЫ
-# ==========================================
-def get_weather(city: str) -> str:
-    fake = {"москва": "-3 C, снег", "сочи": "+18 C, солнечно"}
-    return f"Погода в {city}: {fake.get(city.lower(), '+15 C, ясно')}"
+# Словарь для хранения истории сообщений {user_id: [список сообщений]}
+# Каждое сообщение хранится в формате словаря: {"role": "user"/"assistant", "content": "текст"}
+user_history = {}
 
-def get_time(timezone: str = "UTC") -> str:
+# Максимальное количество хранимых сообщений (последние 5 запросов + 5 ответов)
+MAX_HISTORY = 10
+# Название модели, которую вы скачали в Ollama
+MODEL_NAME = "qwen2.5:3b"
+
+# Команда /start
+@dp.message(Command("start"))
+async def start_cmd(message: Message):
+    user_history[message.from_user.id] = []  # Очищаем историю при старте
+    await message.answer(
+        f"Привет! Я умный чат-бот, работающий на локальной модели {MODEL_NAME}.\n"
+        "Задай мне любой вопрос! Для очистки контекста используй /clear."
+    )
+
+# Команда /clear для очистки истории диалога
+@dp.message(Command("clear"))
+async def clear_cmd(message: Message):
+    user_id = message.from_user.id
+    user_history[user_id] = []
+    await message.answer("🧹 История нашего диалога успешно очищена!")
+
+# Обработка всех текстовых сообщений от пользователя
+@dp.message(F.text)
+async def chat_with_llm(message: Message):
+    user_id = message.from_user.id
+    user_text = message.text
+
+    # Если пользователя еще нет в словаре истории, создаем для него пустой список
+    if user_id not in user_history:
+        user_history[user_id] = []
+
+    # Добавляем новое сообщение пользователя в историю
+    user_history[user_id].append({"role": "user", "content": user_text})
+
+    # Обрезаем историю, если она превышает лимит (помним последние 5 диалогов)
+    if len(user_history[user_id]) > MAX_HISTORY:
+        user_history[user_id] = user_history[user_id][-MAX_HISTORY:]
+
+    # Отправляем временный статус, чтобы пользователь видел, что бот «думает»
+    waiting_message = await message.answer("🔄 Думаю над ответом...")
+
     try:
-        tz = zoneinfo.ZoneInfo(timezone)
-        return datetime.datetime.now(tz).strftime(f"%H:%M (%Y-%m-%d, {timezone})")
-    except Exception:
-        return "Неизвестный часовой пояс."
-
-def calculate(expression: str) -> str:
-    allowed = {"abs": abs, "round": round, "sqrt": math.sqrt, "pi": math.pi}
-    try:
-        return str(eval(expression, {"__builtins__": {}}, allowed))
-    except Exception as e:
-        return f"Ошибка: {e}"
-
-TOOL_FUNCTIONS = {"get_weather": get_weather, "get_time": get_time, "calculate": calculate}
-
-TOOLS_SCHEMA = [
-    {"type": "function", "function": {"name": "get_weather", "description": "Погода в городе", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
-    {"type": "function", "function": {"name": "get_time", "description": "Текущее время", "parameters": {"type": "object", "properties": {"timezone": {"type": "string"}}}}},
-    {"type": "function", "function": {"name": "calculate", "description": "Калькулятор", "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}}
-]
-
-async def run_agent(user_text: str) -> str:
-    messages = [
-        {"role": "system", "content": "Ты умный ассистент. Отвечай на русском. Используй инструменты для погоды, времени или математики."},
-        {"role": "user", "content": user_text}
-    ]
-    
-    for _ in range(5):
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto"
+        # Запрос к локальной Ollama с передачей всей истории
+        response = ollama.chat(
+            model=MODEL_NAME,
+            messages=user_history[user_id]
         )
-        msg = response.choices[0].message
         
-        if not msg.tool_calls:
-            return msg.content or "Пусто"
-        
-        messages.append(msg)
-        for tool_call in msg.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
-            
-            res = TOOL_FUNCTIONS[name](**args) if name in TOOL_FUNCTIONS else "Ошибка инструмента"
-            log.info(f"[tool] {name}({args}) -> {res}")
-            
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": str(res)
-            })
-    return "Не удалось завершить."
+        # Получаем текст ответа
+        bot_response = response['message']['content']
 
-# ==========================================
-# ОБРАБОТЧИКИ
-# ==========================================
-@dp.message(CommandStart())
-async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот в облаке. Напиши вопрос (погода, время, счёт).")
+        # Добавляем ответ бота в историю, чтобы поддерживать контекст
+        user_history[user_id].append({"role": "assistant", "content": bot_response})
 
-@dp.message(F.text & ~F.text.startswith("/"))
-async def handler(message: types.Message):
-    await message.bot.send_chat_action(message.chat.id, "typing")
-    try:
-        ans = await run_agent(message.text)
+        # Удаляем сообщение "Думаю..." и присылаем настоящий ответ
+        await waiting_message.delete()
+        await message.answer(bot_response)
+
     except Exception as e:
-        ans = f"Ошибка OpenAI: {e}"
-    await message.answer(ans)
+        await waiting_message.delete()
+        await message.answer(f"❌ Произошла ошибка при обращении к Ollama: {e}\nУбедитесь, что приложение Ollama запущено.")
 
-# ==========================================
-# ЗАПУСК
-# ==========================================
-async def on_startup(bot: Bot):
-    if WEBHOOK_URL:
-        await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-        log.info(f"Webhook установлен: {WEBHOOK_URL}/webhook")
-
-def main():
-    if not BOT_TOKEN: raise SystemExit("BOT_TOKEN не задан")
-    
-    bot = Bot(token=BOT_TOKEN)
-    if WEBHOOK_URL:
-        dp.startup.register(on_startup)
-        app = web.Application()
-        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
-        setup_application(app, dp, bot=bot)
-        log.info(f"Webhook запуск на порту {PORT}")
-        web.run_app(app, host="0.0.0.0", port=PORT)
-    else:
-        log.info("Polling запуск (локально)")
-        asyncio.run(dp.start_polling(bot))
+# Запуск бота в режиме Long Polling
+async def main():
+    print("Бот успешно запущен и готов к работе!")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
+
