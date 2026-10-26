@@ -1,91 +1,124 @@
-import asyncio
 import os
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.filters import Command
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
+import asyncio
+import logging
+import json
+import datetime
+import math
+import zoneinfo
 
-# Загружаем переменные из .env (нужно только для локальных тестов)
+import google.generativeai as genai
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+from dotenv import load_dotenv
+
 load_dotenv()
 
-# Достаем переменные окружения (на Railway они задаются в панели управления)
-BOT_TOKEN = os.getenv("TOKEN")
-MODEL_NAME = os.getenv("LLM_MODEL", "qwen2.5:3b")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+PORT = int(os.getenv("PORT", "8080"))
 
-# Инициализируем асинхронный клиент. 
-# По умолчанию он смотрит на официальный API OpenAI, но на Railway вы сможете 
-# переопределить BASE_URL на любой бесплатный провайдер (Groq, OpenRouter, Gemini)
-openai_client = AsyncOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL", "https://openai.com")
-)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("bot")
 
-bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Словарь для хранения истории сообщений {user_id: [список сообщений]}
-user_history = {}
-MAX_HISTORY = 10
+# Настройка Gemini
+genai.configure(api_key=GEMINI_API_KEY)
 
+# ==========================================
+# ИНСТРУМЕНТЫ (TOOLS)
+# ==========================================
+def get_weather(city: str) -> str:
+    """Возвращает текущую погоду в указанном городе."""
+    fake = {"москва": "-3 C, снег", "сочи": "+18 C, солнечно"}
+    return f"Погода в {city}: {fake.get(city.lower(), '+15 C, ясно')}"
 
-@dp.message(Command("start"))
-async def start_cmd(message: Message):
-    user_history[message.from_user.id] = []
-    await message.answer(
-        f"Привет! Я умный чат-бот, работающий на модели {MODEL_NAME}.\n"
-        "Задай мне любой вопрос! Для очистки контекста используй /clear."
-    )
-
-
-@dp.message(Command("clear"))
-async def clear_cmd(message: Message):
-    user_id = message.from_user.id
-    user_history[user_id] = []
-    await message.answer("🧹 История нашего диалога успешно очищена!")
-
-
-@dp.message(F.text)
-async def chat_with_llm(message: Message):
-    user_id = message.from_user.id
-    user_text = message.text
-
-    if user_id not in user_history:
-        user_history[user_id] = []
-
-    user_history[user_id].append({"role": "user", "content": user_text})
-
-    if len(user_history[user_id]) > MAX_HISTORY:
-        user_history[user_id] = user_history[user_id][-MAX_HISTORY:]
-
-    waiting_message = await message.answer("🔄 Думаю над ответом...")
-
+def get_time(timezone: str = "UTC") -> str:
+    """Возвращает текущее время в указанном часовом поясе."""
     try:
-        # Асинхронный запрос к языковой модели через универсальный клиент
-        response = await openai_client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=user_history[user_id]
-        )
-        
-        bot_response = response.choices[0].message.content
+        tz = zoneinfo.ZoneInfo(timezone)
+        return datetime.datetime.now(tz).strftime(f"%H:%M (%Y-%m-%d, {timezone})")
+    except Exception:
+        return "Неизвестный часовой пояс."
 
-        user_history[user_id].append({"role": "assistant", "content": bot_response})
-
-        await waiting_message.delete()
-        await message.answer(bot_response)
-
+def calculate(expression: str) -> str:
+    """Вычисляет математическое выражение."""
+    allowed = {"abs": abs, "round": round, "sqrt": math.sqrt, "pi": math.pi}
+    try:
+        return str(eval(expression, {"__builtins__": {}}, allowed))
     except Exception as e:
-        await waiting_message.delete()
-        await message.answer(f"❌ Произошла ошибка при обращении к ИИ: {e}")
+        return f"Ошибка: {e}"
 
+# Список функций, которые может вызывать нейросеть
+TOOL_FUNCTIONS = [get_weather, get_time, calculate]
 
-async def main():
-    print(f"Бот успешно запущен на базе модели {MODEL_NAME}!")
-    # Сбрасываем старые сообщения, которые пришли пока бот спал
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+# Инициализация модели с инструментами
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    tools=TOOL_FUNCTIONS,
+    system_instruction="Ты умный ассистент. Отвечай на русском. Используй инструменты для погоды, времени или математики, если это нужно."
+)
 
+# ==========================================
+# ЛОГИКА АГЕНТА
+# ==========================================
+async def run_agent(user_text: str) -> str:
+    try:
+        # Запускаем чат (для сохранения контекста можно хранить историю, но здесь простой запрос)
+        chat = model.start_chat(enable_automatic_function_calling=True)
+        
+        # Отправляем запрос. Google сам вызовет нужные Python-функции и вернет ответ.
+        response = await chat.send_message_async(user_text)
+        
+        # Логируем вызовы инструментов (для отчета)
+        for message in chat.history:
+            if message.parts and message.parts[0].function_call:
+                fn = message.parts[0].function_call
+                log.info(f"[tool] {fn.name} вызван!")
+                
+        return response.text
+    except Exception as e:
+        return f"Ошибка Gemini: {e}"
+
+# ==========================================
+# ОБРАБОТЧИКИ TELEGRAM
+# ==========================================
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    await message.answer("Привет! Я умный бот на базе Google Gemini. Напиши вопрос (погода, время, счёт).")
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def handler(message: types.Message):
+    await message.bot.send_chat_action(message.chat.id, "typing")
+    ans = await run_agent(message.text)
+    await message.answer(ans)
+
+# ==========================================
+# ЗАПУСК (Webhook / Polling)
+# ==========================================
+async def on_startup(bot: Bot):
+    if WEBHOOK_URL:
+        await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        log.info(f"Webhook установлен: {WEBHOOK_URL}/webhook")
+
+def main():
+    if not BOT_TOKEN: raise SystemExit("BOT_TOKEN не задан")
+    
+    bot = Bot(token=BOT_TOKEN)
+    if WEBHOOK_URL:
+        dp.startup.register(on_startup)
+        app = web.Application()
+        SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path="/webhook")
+        setup_application(app, dp, bot=bot)
+        log.info(f"Webhook запуск на порту {PORT}")
+        web.run_app(app, host="0.0.0.0", port=PORT)
+    else:
+        log.info("Polling запуск (локально)")
+        asyncio.run(dp.start_polling(bot))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 
