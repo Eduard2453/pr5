@@ -6,7 +6,7 @@ import datetime
 import math
 import zoneinfo
 
-import google.generativeai as genai
+from openai import AsyncOpenAI
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -17,7 +17,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO)
@@ -25,19 +25,20 @@ log = logging.getLogger("bot")
 
 dp = Dispatcher()
 
-# Настройка Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# НАСТРОЙКА КЛИЕНТА ПОД OPENROUTER
+client = AsyncOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+)
 
 # ==========================================
-# ИНСТРУМЕНТЫ (TOOLS)
+# ИНСТРУМЕНТЫ (без изменений)
 # ==========================================
 def get_weather(city: str) -> str:
-    """Возвращает текущую погоду в указанном городе."""
     fake = {"москва": "-3 C, снег", "сочи": "+18 C, солнечно"}
     return f"Погода в {city}: {fake.get(city.lower(), '+15 C, ясно')}"
 
 def get_time(timezone: str = "UTC") -> str:
-    """Возвращает текущее время в указанном часовом поясе."""
     try:
         tz = zoneinfo.ZoneInfo(timezone)
         return datetime.datetime.now(tz).strftime(f"%H:%M (%Y-%m-%d, {timezone})")
@@ -45,59 +46,71 @@ def get_time(timezone: str = "UTC") -> str:
         return "Неизвестный часовой пояс."
 
 def calculate(expression: str) -> str:
-    """Вычисляет математическое выражение."""
     allowed = {"abs": abs, "round": round, "sqrt": math.sqrt, "pi": math.pi}
     try:
         return str(eval(expression, {"__builtins__": {}}, allowed))
     except Exception as e:
         return f"Ошибка: {e}"
 
-# Список функций, которые может вызывать нейросеть
-TOOL_FUNCTIONS = [get_weather, get_time, calculate]
+TOOL_FUNCTIONS = {"get_weather": get_weather, "get_time": get_time, "calculate": calculate}
 
-# Инициализация модели с инструментами
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    tools=TOOL_FUNCTIONS,
-    system_instruction="Ты умный ассистент. Отвечай на русском. Используй инструменты для погоды, времени или математики, если это нужно."
-)
+TOOLS_SCHEMA = [
+    {"type": "function", "function": {"name": "get_weather", "description": "Погода в городе", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
+    {"type": "function", "function": {"name": "get_time", "description": "Текущее время", "parameters": {"type": "object", "properties": {"timezone": {"type": "string"}}}}},
+    {"type": "function", "function": {"name": "calculate", "description": "Калькулятор", "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}}
+]
 
-# ==========================================
-# ЛОГИКА АГЕНТА
-# ==========================================
 async def run_agent(user_text: str) -> str:
-    try:
-        # Запускаем чат (для сохранения контекста можно хранить историю, но здесь простой запрос)
-        chat = model.start_chat(enable_automatic_function_calling=True)
+    messages = [
+        {"role": "system", "content": "Ты умный ассистент. Отвечай на русском. Используй инструменты для погоды, времени или математики."},
+        {"role": "user", "content": user_text}
+    ]
+    
+    for _ in range(5):
+        response = await client.chat.completions.create(
+            model="meta-llama/llama-3.3-70b-instruct:free",  # Бесплатная модель
+            messages=messages,
+            tools=TOOLS_SCHEMA,
+            tool_choice="auto"
+        )
+        msg = response.choices[0].message
         
-        # Отправляем запрос. Google сам вызовет нужные Python-функции и вернет ответ.
-        response = await chat.send_message_async(user_text)
+        if not msg.tool_calls:
+            return msg.content or "Пусто"
         
-        # Логируем вызовы инструментов (для отчета)
-        for message in chat.history:
-            if message.parts and message.parts[0].function_call:
-                fn = message.parts[0].function_call
-                log.info(f"[tool] {fn.name} вызван!")
-                
-        return response.text
-    except Exception as e:
-        return f"Ошибка Gemini: {e}"
+        messages.append(msg)
+        for tool_call in msg.tool_calls:
+            name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            
+            res = TOOL_FUNCTIONS[name](**args) if name in TOOL_FUNCTIONS else "Ошибка инструмента"
+            log.info(f"[tool] {name}({args}) -> {res}")
+            
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(res)
+            })
+    return "Не удалось завершить."
 
 # ==========================================
-# ОБРАБОТЧИКИ TELEGRAM
+# ОБРАБОТЧИКИ (без изменений)
 # ==========================================
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот на базе Google Gemini. Напиши вопрос (погода, время, счёт).")
+    await message.answer("Привет! Я умный бот на OpenRouter. Напиши вопрос (погода, время, счёт).")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def handler(message: types.Message):
     await message.bot.send_chat_action(message.chat.id, "typing")
-    ans = await run_agent(message.text)
+    try:
+        ans = await run_agent(message.text)
+    except Exception as e:
+        ans = f"Ошибка OpenRouter: {e}"
     await message.answer(ans)
 
 # ==========================================
-# ЗАПУСК (Webhook / Polling)
+# ЗАПУСК (без изменений)
 # ==========================================
 async def on_startup(bot: Bot):
     if WEBHOOK_URL:
