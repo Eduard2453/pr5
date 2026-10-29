@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import json
 import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
@@ -13,6 +12,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+HF_TOKEN = os.getenv("HF_TOKEN")  # Наш ключ Hugging Face
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO)
@@ -20,59 +20,43 @@ log = logging.getLogger("bot")
 
 dp = Dispatcher()
 
-# Функция запроса к бесплатному DuckDuckGo AI
 async def get_ai_response(prompt: str) -> str:
-    url = "https://duckduckgo.com/duckchat/v1/chat"
-    headers = {
-        "x-vqd-accept": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
+    # Используем API Hugging Face
+    API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            # 1. Получаем токен сессии
-            async with session.get("https://duckduckgo.com/duckchat/v1/status", headers=headers) as resp:
-                if resp.status != 200:
-                    return "Ошибка: не удалось подключиться к нейросети."
-                vqd = resp.headers.get("x-vqd-4")
-                if not vqd:
-                    return "Ошибка: сервер не выдал токен."
-            
-            # 2. Отправляем сообщение
-            headers["x-vqd-4"] = vqd
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            
-            async with session.post(url, headers=headers, json=payload) as resp:
-                if resp.status != 200:
-                    return f"Ошибка сервера: {resp.status}"
-                
-                # Читаем ответ построчно (сервер шлет поток данных)
-                full_text = ""
-                async for line in resp.content:
-                    line_str = line.decode('utf-8').strip()
-                    if line_str.startswith("data: "):
-                        data_str = line_str[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            if "message" in data:
-                                full_text += data["message"]
-                        except json.JSONDecodeError:
-                            pass
-                
-                return full_text if full_text else "Нейросеть промолчала."
-                
-        except Exception as e:
-            log.error(f"Ошибка DuckDuckGo: {e}")
-            return "Извините, нейросеть временно недоступна."
+    # Формируем запрос в формате чата
+    payload = {
+        "inputs": f"Ты умный ассистент. Отвечай на русском языке.\n\nПользователь: {prompt}\nАссистент:",
+        "parameters": {"max_new_tokens": 500, "temperature": 0.7}
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, headers=headers, json=payload, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Извлекаем ответ из JSON
+                    if isinstance(data, list) and len(data) > 0:
+                        text = data[0].get("generated_text", "")
+                        # Отрезаем наш промпт от ответа
+                        if "Ассистент:" in text:
+                            return text.split("Ассистент:")[-1].strip()
+                        return text
+                    return "Нейросеть вернула пустой ответ."
+                elif resp.status == 503:
+                    return "Нейросеть просыпается (это бывает при первом запросе). Подождите 10 секунд и напишите снова."
+                else:
+                    err = await resp.text()
+                    log.error(f"Ошибка HF: {err}")
+                    return "Ошибка нейросети. Попробуйте позже."
+    except Exception as e:
+        log.error(f"Ошибка: {e}")
+        return "Нейросеть временно недоступна."
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот (нейросеть GPT-4o mini). Спроси меня о чем угодно!")
+    await message.answer("Привет! Я умный бот. Спроси меня о чем угодно!")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat_handler(message: types.Message):
