@@ -27,7 +27,7 @@ async def get_ai_response(prompt: str) -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.3-70b-versatile", # Самая мощная бесплатная модель
+        "model": "llama-3.1-70b-versatile", # Заменили на актуальную модель!
         "messages": [
             {"role": "system", "content": "Ты умный и полезный ассистент. Отвечай на русском языке."},
             {"role": "user", "content": prompt}
@@ -52,7 +52,7 @@ async def get_ai_response(prompt: str) -> str:
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот на Groq. Спроси меня о чем угодно!")
+    await message.answer("Привет")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat_handler(message: types.Message):
