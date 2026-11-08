@@ -27,7 +27,7 @@ async def get_ai_response(prompt: str) -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.1-70b-versatile", # Заменили на актуальную модель!
+        "model": "llama3-8b-8192", # Заменили на актуальную модель!
         "messages": [
             {"role": "system", "content": "Ты умный и полезный ассистент. Отвечай на русском языке."},
             {"role": "user", "content": prompt}
