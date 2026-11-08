@@ -12,7 +12,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO)
@@ -21,13 +21,13 @@ log = logging.getLogger("bot")
 dp = Dispatcher()
 
 async def get_ai_response(prompt: str) -> str:
-    url = "https://api.deepseek.com/chat/completions"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-chat", # Модель DeepSeek V3
+        "model": "llama-3.3-70b-versatile", # Самая мощная бесплатная модель
         "messages": [
             {"role": "system", "content": "Ты умный и полезный ассистент. Отвечай на русском языке."},
             {"role": "user", "content": prompt}
@@ -44,15 +44,15 @@ async def get_ai_response(prompt: str) -> str:
                     return data["choices"][0]["message"]["content"]
                 else:
                     err = await resp.text()
-                    log.error(f"Ошибка DeepSeek: {err}")
-                    return f"Ошибка DeepSeek: {resp.status}"
+                    log.error(f"Ошибка Groq: {err}")
+                    return f"Ошибка Groq: {resp.status}"
     except Exception as e:
         log.error(f"Ошибка сети: {e}")
         return "Нейросеть временно недоступна."
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот на базе DeepSeek. Спроси меня о чем угодно!")
+    await message.answer("Привет! Я умный бот на Groq. Спроси меня о чем угодно!")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat_handler(message: types.Message):
