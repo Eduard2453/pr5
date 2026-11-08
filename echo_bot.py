@@ -29,7 +29,7 @@ async def get_ai_response(prompt: str) -> str:
         "X-Title": "My Telegram Bot"
     }
     payload = {
-        "model": "meta-llama/llama-3-8b-instruct:free", # Бесплатная модель!
+        "model": "meta-llama/llama-3.1-8b-instruct:free", # Бесплатная модель!
         "messages": [
             {"role": "user", "content": prompt}
         ]
