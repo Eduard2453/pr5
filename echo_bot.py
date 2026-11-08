@@ -12,7 +12,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+POE_API_KEY = os.getenv("POE_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO)
@@ -21,19 +21,17 @@ log = logging.getLogger("bot")
 dp = Dispatcher()
 
 async def get_ai_response(prompt: str) -> str:
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    # Официальный API Poe
+    url = "https://api.poe.com/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {POE_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.2-11b-text-preview", # Заменили на актуальную модель!
+        "model": "GPT-4o-Mini", # Бесплатная и умная модель
         "messages": [
-            {"role": "system", "content": "Ты умный и полезный ассистент. Отвечай на русском языке."},
             {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 1000
+        ]
     }
 
     try:
@@ -44,15 +42,15 @@ async def get_ai_response(prompt: str) -> str:
                     return data["choices"][0]["message"]["content"]
                 else:
                     err = await resp.text()
-                    log.error(f"Ошибка Groq: {err}")
-                    return f"Ошибка Groq: {resp.status}"
+                    log.error(f"Ошибка Poe: {err}")
+                    return f"Ошибка Poe: {resp.status}"
     except Exception as e:
         log.error(f"Ошибка сети: {e}")
         return "Нейросеть временно недоступна."
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет")
+    await message.answer("Привет! Я умный бот на Poe (GPT-4o). Спроси меня о чем угодно!")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat_handler(message: types.Message):
