@@ -12,7 +12,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-POE_API_KEY = os.getenv("POE_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 PORT = int(os.getenv("PORT", "8080"))
 
 logging.basicConfig(level=logging.INFO)
@@ -21,14 +21,15 @@ log = logging.getLogger("bot")
 dp = Dispatcher()
 
 async def get_ai_response(prompt: str) -> str:
-    # Официальный API Poe
-    url = "https://api.poe.com/v1/chat/completions"
+    url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {POE_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://t.me/your_bot", # Требование OpenRouter
+        "X-Title": "My Telegram Bot"
     }
     payload = {
-        "model": "GPT-4o-Mini", # Бесплатная и умная модель
+        "model": "meta-llama/llama-3-8b-instruct:free", # Бесплатная модель!
         "messages": [
             {"role": "user", "content": prompt}
         ]
@@ -42,15 +43,15 @@ async def get_ai_response(prompt: str) -> str:
                     return data["choices"][0]["message"]["content"]
                 else:
                     err = await resp.text()
-                    log.error(f"Ошибка Poe: {err}")
-                    return f"Ошибка Poe: {resp.status}"
+                    log.error(f"Ошибка OpenRouter: {err}")
+                    return f"Ошибка OpenRouter: {resp.status}"
     except Exception as e:
         log.error(f"Ошибка сети: {e}")
         return "Нейросеть временно недоступна."
 
 @dp.message(CommandStart())
 async def start(message: types.Message):
-    await message.answer("Привет! Я умный бот на Poe (GPT-4o). Спроси меня о чем угодно!")
+    await message.answer("Привет! Я умный бот на OpenRouter. Спроси меня о чем угодно!")
 
 @dp.message(F.text & ~F.text.startswith("/"))
 async def chat_handler(message: types.Message):
